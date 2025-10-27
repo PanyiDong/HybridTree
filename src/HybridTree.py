@@ -11,7 +11,7 @@ File Created: Tuesday, 16th January 2024 11:12:42 am
 Author: Panyi Dong (panyid2@illinois.edu)
 
 -----
-Last Modified: Saturday, 12th July 2025 5:26:47 pm
+Last Modified: Wednesday, 10th September 2025 10:33:09 am
 Modified By: Panyi Dong (panyid2@illinois.edu)
 
 -----
@@ -43,6 +43,7 @@ from functools import partial
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from tqdm import tqdm
 from .utils import (
     DataTypes,
     Node,
@@ -108,6 +109,7 @@ class HybridTree(BaseTreeEstimator):
         self.mean_std_rate = mean_std_rate
         self.GLM_std_rate = GLM_std_rate
         self.GLM_kwargs = GLM_kwargs
+        self.premium_adj_rate = 0.0
 
         self.random_state = random_state
         self.tree = None
@@ -208,9 +210,14 @@ class HybridTree(BaseTreeEstimator):
     ) -> Node:
         sample_per_class = [np.sum(y_clf == c) for c in range(self.n_classes)]
         predicted_class = np.argmax(sample_per_class)
+        probability = np.sum(y_clf > 0) / len(y_clf) if len(y_clf) > 0 else 0.0
 
         # initialize node
-        node = Node(predicted_class, n_samples=len(y_clf))
+        node = Node(
+            predicted_class=predicted_class,
+            probability=probability,
+            n_samples=len(y_clf),
+        )
         # initialize idx
         idx = None
         # max depth criterion
@@ -319,6 +326,9 @@ class HybridTree(BaseTreeEstimator):
         self.n_classes = len(np.unique(y_reg))
         self.n_observations = X.shape[0]
         self.n_features = X.shape[1]
+        self.portfolio_mean = np.mean(y_reg)
+        self.portfolio_std = np.std(y_reg)
+        self.portfolio_nonzero_rate = np.sum(y_clf != 0) / len(y_clf)
 
         # set max_features if not set
         if self.max_features is None:
@@ -353,6 +363,194 @@ class HybridTree(BaseTreeEstimator):
 
         return node.prediction_model.predict(X.reshape(1, -1))
 
-    def predict(self, X: DataTypes) -> np.ndarray:
+    def _predict_two_step(
+        self,
+        X: DataTypes,
+        threshold: float = 0.1,
+        type: str = "hard",
+        return_prob: bool = False,
+    ) -> float:
+        # initialize node
+        node = self.tree
+        # traverse the tree until reaching a leaf node
+        while node.left:
+            if X[node.feature_index] < node.threshold:
+                node = node.left
+            else:
+                node = node.right
+
+        # set standard deviation for ZeroEstimator to 1
+        # to avoid zero prediction
+        if (
+            isinstance(node.prediction_model, ZeroEstimator)
+            and np.abs(node.prediction_model.std_rate) < 1e-6
+        ):
+            node.prediction_model.std_rate = 1
+
+        # get the prediction from the prediction model
+        probability = node.probability
+        prediction = node.prediction_model.predict(X.reshape(1, -1))
+        standard_premium = max(
+            0, self.portfolio_mean + self.premium_adj_rate * self.portfolio_std
+        )
+        # prevent prediction from being less than 1e-6
+        condition = (probability >= threshold) & (
+            prediction[0] > 0.2 * standard_premium
+        )
+
+        # apply threshold for two-step prediction
+        if return_prob:
+            if type == "hard":
+                return 1.0 if probability >= threshold else 0.0, (
+                    prediction if condition else [standard_premium]
+                )
+            elif type == "soft":
+                return probability, (prediction if condition else [standard_premium])
+        else:
+            if type == "hard":
+                return prediction if condition else [standard_premium]
+            elif type == "soft":
+                return [
+                    probability * (prediction[0] if condition else standard_premium)
+                ]
+
+    def predict(
+        self,
+        X: DataTypes,
+        type: str = "loss",
+        prob_type: str = "hard",
+        threshold: float = 0.1,
+    ) -> np.ndarray:
         X = self._format_types(X)
-        return np.array([self._predict_instance(x) for x in X])
+        if type == "loss":
+            return np.array([self._predict_instance(x) for x in X])
+        elif type == "premium":
+            return np.array(
+                [self._predict_two_step(x, threshold, type=prob_type) for x in X]
+            )
+        elif type == "premium_ensemble":
+            prob, pred = list(
+                zip(
+                    *[
+                        self._predict_two_step(
+                            x, threshold, type=prob_type, return_prob=True
+                        )
+                        for x in X
+                    ]
+                )
+            )
+            return prob, pred
+
+
+class HybridTreeEnsemble(HybridTree):
+
+    def __init__(
+        self,
+        n_trees: int = 10,
+        split_ratio: float = 0.8,
+        max_depth: int = None,
+        max_features: int = None,
+        min_impurity_decrease: float = 0.0,
+        min_samples_split: int = 2,
+        impurity_method: str = "gini",
+        cp: float = 0.0001,
+        pruning_criterion: str = "misclassification",
+        GLM_type: str = "GLM",
+        GLM_family: str = None,
+        GLM_zero_threshold: float = 0.90,
+        GLM_min_samples_leaf: int = 40,
+        zero_std_rate: float = 0.0,
+        mean_std_rate: float = 0.0,
+        GLM_std_rate: float = 0.0,
+        random_state: int = None,
+        **GLM_kwargs,
+    ) -> None:
+        self.HT_kwargs = {
+            "max_depth": max_depth,
+            "max_features": max_features,
+            "min_impurity_decrease": min_impurity_decrease,
+            "min_samples_split": min_samples_split,
+            "impurity_method": impurity_method,
+            "cp": cp,
+            "pruning_criterion": pruning_criterion,
+            "GLM_type": GLM_type,
+            "GLM_family": GLM_family,
+            "GLM_zero_threshold": GLM_zero_threshold,
+            "GLM_min_samples_leaf": GLM_min_samples_leaf,
+            "zero_std_rate": zero_std_rate,
+            "mean_std_rate": mean_std_rate,
+            "GLM_std_rate": GLM_std_rate,
+            "random_state": random_state,
+            **GLM_kwargs,
+        }
+        self.n_trees = n_trees
+        self.split_ratio = split_ratio
+        self.random_state = random_state
+
+    def fit(
+        self, X: DataTypes, y_clf: DataTypes, y_reg: DataTypes
+    ) -> HybridTreeEnsemble:
+
+        self.regs = []
+        self.trees = []
+
+        for _ in tqdm(range(self.n_trees)):
+            reg = HybridTree(**self.HT_kwargs)
+            idx = np.random.choice(
+                X.index, size=int(self.split_ratio * len(X)), replace=False
+            )
+            reg.fit(
+                X.iloc[idx, :],
+                (y_clf[idx] > 1e-6).astype(int),
+                y_reg[idx],
+            )
+            if reg.tree.left is None:
+                print("Tree is empty, skipping this tree.")
+                break
+            self.regs.append(reg)
+            self.trees.append(reg.tree)
+
+    def predict(
+        self,
+        X: DataTypes,
+        type: str = "loss",
+        prob_type: str = "hard",
+        threshold: float = 0.1,
+        lower_quantile: int = 0,
+        upper_quantile: int = 100,
+    ) -> np.ndarray:
+        percentile_mean = lambda x: np.mean(
+            x[
+                (x >= np.percentile(x, lower_quantile))
+                & (x <= np.percentile(x, upper_quantile))
+            ]
+        )
+        if type == "loss" or type == "premium":
+            return np.apply_along_axis(
+                percentile_mean,
+                0,
+                np.array(
+                    [
+                        reg.predict(
+                            X, type=type, prob_type=prob_type, threshold=threshold
+                        )
+                        for reg in self.regs
+                    ]
+                ),
+            )
+        elif type == "premium_ensemble":
+            prob, pred = list(
+                zip(
+                    *[
+                        reg.predict(
+                            X, type=type, prob_type=prob_type, threshold=threshold
+                        )
+                        for reg in self.regs
+                    ]
+                )
+            )
+            result = np.multiply(
+                np.array(prob).reshape(self.n_trees, -1),
+                np.array(pred).reshape(self.n_trees, -1),
+            )
+            return np.apply_along_axis(percentile_mean, 0, result)

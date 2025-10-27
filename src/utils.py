@@ -11,7 +11,7 @@ File Created: Tuesday, 16th January 2024 11:13:07 am
 Author: Panyi Dong (panyid2@illinois.edu)
 
 -----
-Last Modified: Sunday, 13th July 2025 11:25:28 pm
+Last Modified: Saturday, 26th July 2025 9:29:47 am
 Modified By: Panyi Dong (panyid2@illinois.edu)
 
 -----
@@ -211,9 +211,11 @@ class Node:
     def __init__(
         self,
         predicted_class: int,
+        probability: float,
         **kwargs,
     ) -> None:
         self.predicted_class = predicted_class
+        self.probability = probability
         self.n_samples = kwargs.get("n_samples", 0)
         self.prediction_model = None
         self.feature_index = 0
@@ -798,3 +800,34 @@ def StorePredictionError(y, py):
         round(mae(y, py), 4),
     ]
     return temp_vals
+
+
+# def find_close_group(test_groups: list, train_groups: list) :
+#     close_group = []
+#     for i, test_group in enumerate(test_groups) :
+#         if test_group in train_groups :
+#             close_group.append(test_group)
+#         else :
+#             compare_groups = [sum(abs(int(i) - int(j)) for i, j in zip(test_group, train_group)) for train_group in train_groups]
+#             close_group.append(train_groups[np.argmin(compare_groups)])
+#     return close_group
+
+# def get_decision_group(X, decision_path: list) :
+#     group_idx = []
+#     for node in decision_path :
+#         feature_idx, threshold = node.split("_")
+#         group_idx.append((X.iloc[:, int(feature_idx)] <= float(threshold)).astype(int).astype(str).values)
+
+#     group_idx = ["".join(idx) for idx in zip(*group_idx)]
+#     return group_idx
+
+# group_idx = get_decision_group(bg_X_train, decision_path)
+# test_group_idx = get_decision_group(bg_X_test, decision_path)
+# test_group_idx = find_close_group(test_group_idx, group_idx)
+# predict_table = pd.DataFrame({
+#     "pred": bg_y_train,
+#     "group_idx": group_idx,
+# }).groupby("group_idx").agg("mean").reset_index()
+
+# bg_y_pred_rule = pd.Series(group_idx).map(predict_table.set_index("group_idx")["pred"]).values
+# bg_y_pred_test_rule = pd.Series(test_group_idx).map(predict_table.set_index("group_idx")["pred"]).values
